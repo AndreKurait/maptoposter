@@ -11,6 +11,10 @@ import os
 from datetime import datetime
 import argparse
 
+# Enable osmnx caching
+ox.settings.use_cache = True
+ox.settings.cache_folder = './cache'
+
 THEMES_DIR = "themes"
 FONTS_DIR = "fonts"
 POSTERS_DIR = "posters"
@@ -220,6 +224,27 @@ def get_coordinates(city, country):
     else:
         raise ValueError(f"Could not find coordinates for {city}, {country}")
 
+def crop_map_viewport(ax, target_aspect):
+    """Crop the map viewport to match target aspect ratio (width/height)."""
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+    
+    width = x_max - x_min
+    height = y_max - y_min
+    current_aspect = width / height
+    
+    cx = (x_min + x_max) / 2
+    cy = (y_min + y_max) / 2
+    
+    if current_aspect > target_aspect:
+        # too wide → crop left/right
+        new_width = height * target_aspect
+        ax.set_xlim(cx - new_width / 2, cx + new_width / 2)
+    else:
+        # too tall → crop top/bottom
+        new_height = width / target_aspect
+        ax.set_ylim(cy - new_height / 2, cy + new_height / 2)
+
 def create_poster(city, country, point, dist, output_file, ratio=1.33):
     print(f"\nGenerating map for {city}, {country}...")
     
@@ -247,6 +272,14 @@ def create_poster(city, country, point, dist, output_file, ratio=1.33):
         except:
             parks = None
         pbar.update(1)
+    
+    # Reproject to local metric CRS to fix aspect distortion at any latitude
+    G = ox.project_graph(G)
+    graph_crs = G.graph.get("crs")
+    if water is not None and not water.empty:
+        water = water.to_crs(graph_crs)
+    if parks is not None and not parks.empty:
+        parks = parks.to_crs(graph_crs)
     
     print("✓ All data downloaded successfully!")
     
@@ -285,19 +318,8 @@ def create_poster(city, country, point, dist, output_file, ratio=1.33):
     for coll in ax.collections:
         coll.set_zorder(Z_ROADS)
     
-    # Crop to inscribed rectangle in circle of radius=dist
-    # For circle radius r and aspect ratio k: width = 2r/sqrt(1+k²), height = width*k
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    cx = (xlim[0] + xlim[1]) / 2
-    cy = (ylim[0] + ylim[1]) / 2
-    data_half = (xlim[1] - xlim[0]) / 2  # half the data width (approx radius in coords)
-    
-    import math
-    half_w = data_half / math.sqrt(1 + ratio**2)
-    half_h = half_w * ratio
-    ax.set_xlim(cx - half_w, cx + half_w)
-    ax.set_ylim(cy - half_h, cy + half_h)
+    # Crop viewport to match figure aspect ratio (width/height = 1/ratio)
+    crop_map_viewport(ax, 1 / ratio)
     
     # Layer 3: Gradients (Top and Bottom)
     create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=Z_GRADIENT)
