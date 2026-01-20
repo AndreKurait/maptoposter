@@ -15,6 +15,13 @@ THEMES_DIR = "themes"
 FONTS_DIR = "fonts"
 POSTERS_DIR = "posters"
 
+# Z-order constants for proper layering
+Z_WATER = 1
+Z_PARKS = 2
+Z_ROADS = 5
+Z_GRADIENT = 10
+Z_TEXT = 20
+
 def load_fonts():
     """
     Load Roboto fonts from the fonts directory.
@@ -213,14 +220,14 @@ def get_coordinates(city, country):
     else:
         raise ValueError(f"Could not find coordinates for {city}, {country}")
 
-def create_poster(city, country, point, dist, output_file):
+def create_poster(city, country, point, dist, output_file, ratio=1.33):
     print(f"\nGenerating map for {city}, {country}...")
     
     # Progress bar for data fetching
     with tqdm(total=3, desc="Fetching map data", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}') as pbar:
         # 1. Fetch Street Network
         pbar.set_description("Downloading street network")
-        G = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all')
+        G = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all', truncate_by_edge=True)
         pbar.update(1)
         time.sleep(0.5)  # Rate limit between requests
         
@@ -245,16 +252,22 @@ def create_poster(city, country, point, dist, output_file):
     
     # 2. Setup Plot
     print("Rendering map...")
-    fig, ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
+    fig_w = 12
+    fig_h = fig_w * ratio
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=THEME['bg'])
     ax.set_facecolor(THEME['bg'])
     ax.set_position([0, 0, 1, 1])
     
     # 3. Plot Layers
-    # Layer 1: Polygons
+    # Layer 1: Polygons (filter out Point geometries)
     if water is not None and not water.empty:
-        water.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=1)
+        water = water[water.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])]
+        if not water.empty:
+            water.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=Z_WATER)
     if parks is not None and not parks.empty:
-        parks.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
+        parks = parks[parks.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])]
+        if not parks.empty:
+            parks.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=Z_PARKS)
     
     # Layer 2: Roads with hierarchy coloring
     print("Applying road hierarchy colors...")
@@ -268,10 +281,27 @@ def create_poster(city, country, point, dist, output_file):
         edge_linewidth=edge_widths,
         show=False, close=False
     )
+    # Set road zorder on the LineCollection
+    for coll in ax.collections:
+        coll.set_zorder(Z_ROADS)
+    
+    # Crop to inscribed rectangle in circle of radius=dist
+    # For circle radius r and aspect ratio k: width = 2r/sqrt(1+k²), height = width*k
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    cx = (xlim[0] + xlim[1]) / 2
+    cy = (ylim[0] + ylim[1]) / 2
+    data_half = (xlim[1] - xlim[0]) / 2  # half the data width (approx radius in coords)
+    
+    import math
+    half_w = data_half / math.sqrt(1 + ratio**2)
+    half_h = half_w * ratio
+    ax.set_xlim(cx - half_w, cx + half_w)
+    ax.set_ylim(cy - half_h, cy + half_h)
     
     # Layer 3: Gradients (Top and Bottom)
-    create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=10)
-    create_gradient_fade(ax, THEME['gradient_color'], location='top', zorder=10)
+    create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=Z_GRADIENT)
+    create_gradient_fade(ax, THEME['gradient_color'], location='top', zorder=Z_GRADIENT)
     
     # 4. Typography using Roboto font
     if FONTS:
@@ -290,10 +320,10 @@ def create_poster(city, country, point, dist, output_file):
 
     # --- BOTTOM TEXT ---
     ax.text(0.5, 0.14, spaced_city, transform=ax.transAxes,
-            color=THEME['text'], ha='center', fontproperties=font_main, zorder=11)
+            color=THEME['text'], ha='center', fontproperties=font_main, zorder=Z_TEXT)
     
     ax.text(0.5, 0.10, country.upper(), transform=ax.transAxes,
-            color=THEME['text'], ha='center', fontproperties=font_sub, zorder=11)
+            color=THEME['text'], ha='center', fontproperties=font_sub, zorder=Z_TEXT)
     
     lat, lon = point
     coords = f"{lat:.4f}° N / {lon:.4f}° E" if lat >= 0 else f"{abs(lat):.4f}° S / {lon:.4f}° E"
@@ -301,10 +331,10 @@ def create_poster(city, country, point, dist, output_file):
         coords = coords.replace("E", "W")
     
     ax.text(0.5, 0.07, coords, transform=ax.transAxes,
-            color=THEME['text'], alpha=0.7, ha='center', fontproperties=font_coords, zorder=11)
+            color=THEME['text'], alpha=0.7, ha='center', fontproperties=font_coords, zorder=Z_TEXT)
     
     ax.plot([0.4, 0.6], [0.125, 0.125], transform=ax.transAxes, 
-            color=THEME['text'], linewidth=1, zorder=11)
+            color=THEME['text'], linewidth=1, zorder=Z_TEXT)
 
     # --- ATTRIBUTION (bottom right) ---
     if FONTS:
@@ -314,7 +344,7 @@ def create_poster(city, country, point, dist, output_file):
     
     ax.text(0.98, 0.02, "© OpenStreetMap contributors", transform=ax.transAxes,
             color=THEME['text'], alpha=0.5, ha='right', va='bottom', 
-            fontproperties=font_attr, zorder=11)
+            fontproperties=font_attr, zorder=Z_TEXT)
 
     # 5. Save
     print(f"Saving to {output_file}...")
@@ -420,6 +450,7 @@ Examples:
     parser.add_argument('--country', '-C', type=str, help='Country name')
     parser.add_argument('--theme', '-t', type=str, default='feature_based', help='Theme name (default: feature_based)')
     parser.add_argument('--distance', '-d', type=int, default=29000, help='Map radius in meters (default: 29000)')
+    parser.add_argument('--ratio', '-r', type=float, default=1.33, help='Height/width ratio (default: 1.33 for portrait)')
     parser.add_argument('--list-themes', action='store_true', help='List all available themes')
     
     args = parser.parse_args()
@@ -458,7 +489,7 @@ Examples:
     try:
         coords = get_coordinates(args.city, args.country)
         output_file = generate_output_filename(args.city, args.theme)
-        create_poster(args.city, args.country, coords, args.distance, output_file)
+        create_poster(args.city, args.country, coords, args.distance, output_file, ratio=args.ratio)
         
         print("\n" + "=" * 50)
         print("✓ Poster generation complete!")
